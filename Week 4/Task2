@@ -1,0 +1,109 @@
+import serial, time, sys, math
+from collections import deque
+import numpy as np
+
+SERIAL_PORT = 'COM3'   # <- change to your board's COM
+BAUD = 9600
+
+# Put your authorized card UIDs here (uppercase, no spaces)
+authorized_cards = {
+    "04AABBCCDD",
+    "1234567890"
+}
+
+# Motion detection params
+WINDOW_SEC = 3.0           # collect this many seconds after prompt
+ACC_INTERVAL = 0.02        # matches Arduino ~50 Hz
+RADIUS_CV_MAX = 0.35       # std/mean radius must be below this
+ANGLE_SPAN_MIN_DEG = 270   # must cover at least this span
+
+def detect_circular_motion(samples_xy):
+    """
+    samples_xy: Nx2 numpy array of (ax, ay)
+    Returns True if circular-ish.
+    """
+    if len(samples_xy) < 30:
+        return False
+
+    # Center the data
+    center = samples_xy.mean(axis=0)
+    pts = samples_xy - center
+
+    # Radii and angle
+    radii = np.linalg.norm(pts, axis=1)
+    mean_r = np.mean(radii)
+    std_r = np.std(radii)
+
+    if mean_r <= 1e-6:
+        return False
+
+    cv = std_r / mean_r
+
+    # Angular coverage (wrap-safe)
+    angles = np.unwrap(np.arctan2(pts[:,1], pts[:,0]))
+    span_deg = (angles.max() - angles.min()) * 180.0 / math.pi
+
+    # Heuristics: radius relatively stable + large angular sweep
+    is_circular = (cv <= RADIUS_CV_MAX) and (span_deg >= ANGLE_SPAN_MIN_DEG)
+    return is_circular
+
+def collect_motion_for(seconds, ser):
+    """
+    Collect (ax, ay) from "ACC:ax,ay,az" lines for 'seconds' duration.
+    """
+    buf_xy = []
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        line = ser.readline().decode(errors='ignore').strip()
+        if line.startswith("ACC:"):
+            try:
+                _, rest = line.split("ACC:")
+                parts = rest.split(",")
+                ax = int(parts[0]); ay = int(parts[1])
+                buf_xy.append((ax, ay))
+            except Exception:
+                pass
+    if not buf_xy:
+        return np.zeros((0,2))
+    return np.array(buf_xy, dtype=np.float64)
+
+def main():
+    print(f"Opening {SERIAL_PORT} @ {BAUD} ...")
+    ser = serial.Serial(SERIAL_PORT, BAUD, timeout=1)
+    time.sleep(2)  # allow board to reset
+
+    try:
+        print("Ready. Scan an RFID tag...")
+        while True:
+            line = ser.readline().decode(errors='ignore').strip()
+
+            # Show live status occasionally
+            if not line:
+                continue
+
+            if line.startswith("UID:"):
+                uid = line[4:].strip().upper()
+                print(f"[RFID] UID detected: {uid}")
+
+                if uid in authorized_cards:
+                    print("RFID authorized. Perform a circular motion in 3 seconds...")
+                    time.sleep(0.6)
+                    motion = collect_motion_for(WINDOW_SEC, ser)
+                    ok = detect_circular_motion(motion)
+                    if ok:
+                        print("Motion verified ✅  Access granted.")
+                        ser.write(b'A')
+                    else:
+                        print("Motion invalid ❌  Access denied.")
+                        ser.write(b'D')
+                else:
+                    print("RFID unauthorized ❌  Access denied.")
+                    ser.write(b'D')
+
+    except KeyboardInterrupt:
+        print("\nExiting.")
+    finally:
+        ser.close()
+
+if _name_ == "_main_":
+    main()
