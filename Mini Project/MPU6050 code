@@ -6,12 +6,12 @@
 #include <ArduinoJson.h>
 
 // ================= WIFI =================
-const char* ssid = "zzz";
-const char* password = "12345627";
+const char* ssid = "***";
+const char* password = "*****************";
 
 // ================= TELEGRAM =================
-#define BOT_TOKEN "8317803239:AAHHJ5fQ3zo6IAuJKGbZcFwXNiZ8hOgSYP0"
-#define CHAT_ID   "1045076189"
+#define BOT_TOKEN "***************************"
+#define CHAT_ID   "**********"
 
 WiFiClientSecure client;
 UniversalTelegramBot bot(BOT_TOKEN, client);
