@@ -1,0 +1,204 @@
+#include "HUSKYLENS.h"
+#include <SoftwareSerial.h>
+#include <Servo.h>
+
+// ================= HUSKYLENS =================
+HUSKYLENS huskylens;
+SoftwareSerial huskySerial(2, 3); // RX, TX
+
+// ================= ULTRASONIC =================
+#define TRIG_PIN 9
+#define ECHO_PIN 10
+
+// ================= RAIN SENSOR =================
+#define RAIN_PIN A0
+
+// ================= BUZZERS =================
+#define BUZZER_PIN 8          // Original buzzer (Rain)
+#define BUZZER_OBSTACLE_PIN 5 // NEW buzzer (Obstacle)
+
+// ================= SERVO =================
+#define SERVO_PIN 6
+Servo obstacleServo;
+
+// ================= BUTTON =================
+#define BUTTON_PIN 7
+
+// ================= TIMING =================
+const unsigned long ACTIVE_DURATION = 600000; // 10 minutes
+const unsigned long READ_INTERVAL   = 1000;   // 1 second
+
+// ================= STATES =================
+bool systemEnabled = false;
+bool systemActive  = false;
+bool lastButtonState = HIGH;
+bool obstacleDetected = false;
+
+unsigned long activationStartTime = 0;
+unsigned long lastReadTime = 0;
+
+int rainValue;
+int distanceCM;
+
+// ================= ULTRASONIC FILTER =================
+int getStableDistance() {
+  long sum = 0;
+  int validCount = 0;
+
+  for (int i = 0; i < 5; i++) {
+    digitalWrite(TRIG_PIN, LOW);
+    delayMicroseconds(2);
+    digitalWrite(TRIG_PIN, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(TRIG_PIN, LOW);
+
+    long duration = pulseIn(ECHO_PIN, HIGH, 30000);
+    int d = duration * 0.034 / 2;
+
+    if (d > 0 && d < 300) {
+      sum += d;
+      validCount++;
+    }
+    delay(8);
+  }
+
+  if (validCount == 0) return -1;
+  return sum / validCount;
+}
+
+// ================= SETUP =================
+void setup() {
+  Serial.begin(9600);
+
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+  
+  pinMode(BUZZER_PIN, OUTPUT);          // Rain buzzer
+  pinMode(BUZZER_OBSTACLE_PIN, OUTPUT); // Obstacle buzzer
+  
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+
+  obstacleServo.attach(SERVO_PIN);
+  obstacleServo.write(90); // neutral
+
+  huskySerial.begin(9600);
+  while (!huskylens.begin(huskySerial)) {
+    Serial.println("HuskyLens not connected");
+    delay(1000);
+  }
+
+  Serial.println("System Ready - Press button to ENABLE");
+}
+
+// ================= LOOP =================
+void loop() {
+
+  // ========= BUTTON TOGGLE =========
+  bool buttonState = digitalRead(BUTTON_PIN);
+  if (lastButtonState == HIGH && buttonState == LOW) {
+    systemEnabled = !systemEnabled;
+    systemActive = false;
+    obstacleDetected = false;
+    obstacleServo.write(90);
+    noTone(BUZZER_PIN);
+    noTone(BUZZER_OBSTACLE_PIN); // Ensure new buzzer is off
+
+    Serial.println(systemEnabled ? "System ENABLED" : "System DISABLED");
+    delay(200); // debounce
+  }
+  lastButtonState = buttonState;
+
+  if (!systemEnabled) return;
+
+  // ========= FACE DETECTION =========
+  if (!systemActive) {
+    if (huskylens.request() && huskylens.available()) {
+      HUSKYLENSResult result = huskylens.read();
+      if (result.command == COMMAND_RETURN_BLOCK) {
+        systemActive = true;
+        activationStartTime = millis();
+        lastReadTime = millis();
+        Serial.println("Face detected -> ACTIVE for 10 minutes");
+      }
+    }
+    return;
+  }
+
+  // ========= 10-MINUTE TIME LIMIT =========
+  if (millis() - activationStartTime >= ACTIVE_DURATION) {
+    systemActive = false;
+    obstacleDetected = false;
+    obstacleServo.write(90);
+    noTone(BUZZER_PIN);
+    noTone(BUZZER_OBSTACLE_PIN); // Ensure new buzzer is off
+    Serial.println("10 minutes elapsed -> Face required again");
+    return;
+  }
+
+  // ========= SENSOR READ EVERY 1 SECOND =========
+  if (millis() - lastReadTime >= READ_INTERVAL) {
+    lastReadTime = millis();
+
+    // ---- Distance (stable) ----
+    distanceCM = getStableDistance();
+
+    if (distanceCM != -1) {
+      // Hysteresis logic for state
+      if (!obstacleDetected && distanceCM < 45) {
+        obstacleDetected = true;
+      }
+      else if (obstacleDetected && distanceCM > 60) {
+        obstacleDetected = false;
+      }
+
+      // ---- New Buzzer Logic (Blickering Sound) ----
+      // If distance is less than 45cm, play distinct sound
+      if (distanceCM < 45) {
+        // "Blickering" sound: Beep-Beep (High Pitch)
+        tone(BUZZER_OBSTACLE_PIN, 3000); // Higher pitch than rain
+        delay(100);
+        noTone(BUZZER_OBSTACLE_PIN);
+        delay(50);
+        tone(BUZZER_OBSTACLE_PIN, 3000);
+        delay(100);
+        noTone(BUZZER_OBSTACLE_PIN);
+      }
+    }
+
+    // ---- Servo (ONLY obstacle) ----
+    if (obstacleDetected) {
+      obstacleServo.write(180);
+    } else {
+      obstacleServo.write(90);
+    }
+
+    // ---- Rain ----
+    rainValue = analogRead(RAIN_PIN);
+
+    if (rainValue < 400) {
+      // HEAVY RAIN -> long beep
+      tone(BUZZER_PIN, 2000);
+      delay(700);
+      noTone(BUZZER_PIN);
+    }
+    else if (rainValue < 700) {
+      // LIGHT RAIN -> short beep
+      tone(BUZZER_PIN, 2000);
+      delay(150);
+      noTone(BUZZER_PIN);
+    }
+
+    // ---- OUTPUT ----
+    Serial.println("=== SENSOR DATA ===");
+    Serial.print("Distance: ");
+    if (distanceCM == -1) Serial.println("Invalid");
+    else {
+      Serial.print(distanceCM);
+      Serial.println(" cm");
+    }
+
+    Serial.print("Rain value: ");
+    Serial.println(rainValue);
+    Serial.println("-------------------");
+  }
+}
