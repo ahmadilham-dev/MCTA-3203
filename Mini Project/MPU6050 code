@@ -1,0 +1,156 @@
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <Wire.h>
+#include <MPU6050.h>
+#include <UniversalTelegramBot.h>
+#include <ArduinoJson.h>
+
+// ================= WIFI =================
+const char* ssid = "zzz";
+const char* password = "12345627";
+
+// ================= TELEGRAM =================
+#define BOT_TOKEN "8317803239:AAHHJ5fQ3zo6IAuJKGbZcFwXNiZ8hOgSYP0"
+#define CHAT_ID   "1045076189"
+
+WiFiClientSecure client;
+UniversalTelegramBot bot(BOT_TOKEN, client);
+
+// ================= MPU6050 =================
+MPU6050 mpu;
+
+// ================= CALIBRATION =================
+float pitchOffset = 0;
+float rollOffset  = 0;
+bool calibrated = false;
+
+// ================= FALL DETECTION =================
+float ax, ay, az;
+float pitch, roll;
+float pitchCorrected, rollCorrected;
+
+const float ANGLE_THRESHOLD = 45.0;     // degrees
+const unsigned long FALL_TIME = 2000;   // must stay tilted (ms)
+const unsigned long ALERT_COOLDOWN = 30000;
+
+unsigned long tiltStartTime = 0;
+unsigned long lastAlertTime = 0;
+bool tiltDetected = false;
+
+// ================= CALIBRATION FUNCTION =================
+void calibrateOrigin() {
+  int16_t rawAx, rawAy, rawAz;
+  float pitchSum = 0, rollSum = 0;
+  const int samples = 100;
+
+  Serial.println("📐 Calibrating... Keep device upright");
+
+  for (int i = 0; i < samples; i++) {
+    mpu.getAcceleration(&rawAx, &rawAy, &rawAz);
+
+    float x = rawAx / 16384.0;
+    float y = rawAy / 16384.0;
+    float z = rawAz / 16384.0;
+
+    float p = atan2(x, sqrt(y*y + z*z)) * 180 / PI;
+    float r = atan2(y, sqrt(x*x + z*z)) * 180 / PI;
+
+    pitchSum += p;
+    rollSum  += r;
+    delay(10);
+  }
+
+  pitchOffset = pitchSum / samples;
+  rollOffset  = rollSum  / samples;
+  calibrated = true;
+
+  Serial.println("✅ Calibration complete");
+  Serial.print("Pitch offset: ");
+  Serial.println(pitchOffset);
+  Serial.print("Roll offset: ");
+  Serial.println(rollOffset);
+}
+
+// ================= SETUP =================
+void setup() {
+  Serial.begin(115200);
+  Wire.begin(21, 22);
+
+  mpu.initialize();
+  if (!mpu.testConnection()) {
+    Serial.println("❌ MPU6050 not detected");
+    while (1);
+  }
+  Serial.println("✅ MPU6050 connected");
+
+  delay(3000);        // time to place device upright
+  calibrateOrigin();  // set origin angle
+
+  client.setInsecure();
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting to WiFi");
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\n✅ WiFi connected");
+
+  bot.sendMessage(CHAT_ID,
+    "🟢 ESP32 Fall Detection ONLINE\n📐 Angle calibrated", "");
+}
+
+// ================= LOOP =================
+void loop() {
+  int16_t rawAx, rawAy, rawAz;
+  mpu.getAcceleration(&rawAx, &rawAy, &rawAz);
+
+  ax = rawAx / 16384.0;
+  ay = rawAy / 16384.0;
+  az = rawAz / 16384.0;
+
+  pitch = atan2(ax, sqrt(ay*ay + az*az)) * 180 / PI;
+  roll  = atan2(ay, sqrt(ax*ax + az*az)) * 180 / PI;
+
+  pitchCorrected = pitch - pitchOffset;
+  rollCorrected  = roll  - rollOffset;
+
+  Serial.print("Pitch: ");
+  Serial.print(pitchCorrected);
+  Serial.print(" | Roll: ");
+  Serial.println(rollCorrected);
+
+  unsigned long now = millis();
+
+  // ===== FALL LOGIC =====
+  if (abs(pitchCorrected) > ANGLE_THRESHOLD ||
+      abs(rollCorrected)  > ANGLE_THRESHOLD) {
+
+    if (!tiltDetected) {
+      tiltDetected = true;
+      tiltStartTime = now;
+      Serial.println("⚠️ Tilt detected");
+    } else if (now - tiltStartTime >= FALL_TIME &&
+               now - lastAlertTime > ALERT_COOLDOWN) {
+      sendFallAlert();
+      lastAlertTime = now;
+      tiltDetected = false;
+    }
+  } else {
+    tiltDetected = false;
+  }
+
+  delay(50);
+}
+
+// ================= TELEGRAM ALERT =================
+void sendFallAlert() {
+  Serial.println("🚨 FALL DETECTED");
+
+  String message;
+  message  = "🚨 FALL DETECTED!\n";
+  message += "Abnormal tilt detected.\n";
+  message += "User may need assistance.";
+
+  bot.sendMessage(CHAT_ID, message, "Markdown");
+}
